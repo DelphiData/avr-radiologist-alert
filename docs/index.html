@@ -1,0 +1,152 @@
+
+
+
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>AVR Radiologist Alert Status</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font-family: system-ui, Arial, sans-serif; margin: 2rem; }
+    code { background: #f6f8fa; padding: 0.2rem 0.4rem; border-radius: 4px; }
+    .ok { color: #176f2c; }
+    .bad { color: #9c1a1a; }
+    table { border-collapse: collapse; }
+    td, th { border: 1px solid #ddd; padding: 6px 10px; }
+    .section { margin-top: 1rem; }
+    .muted { color: #666; }
+    .banner { background: #fff3cd; border: 1px solid #ffeeba; padding: 10px 12px; border-radius: 6px; color: #8a6d3b; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+  </style>
+</head>
+<body>
+  <h1>AVR Radiologist Alert - Latest Status</h1>
+
+  <div class="section banner">
+    <strong>Manual step required: create the GitHub repository.</strong>
+    <div>We couldn't automatically create the repository. Please create a private repo named <span class="mono">avr-radiologist-alert</span> under <span class="mono">DelphiData</span>.</div>
+    <div>Quick link: <a href="https://github.com/new?name=avr-radiologist-alert&amp;visibility=private">Create avr-radiologist-alert</a></div>
+    <div>Once the repo is created and the workflow runs, this page will show live status. Repo link: <a href="https://github.com/DelphiData/avr-radiologist-alert">https://github.com/DelphiData/avr-radiologist-alert</a></div>
+  </div>
+
+  <div class="section">
+    <h3>Setup checklist</h3>
+    <ol>
+      <li>Create the private repository: <code>DelphiData/avr-radiologist-alert</code></li>
+      <li>Add repository secrets (Settings → Secrets and variables → Actions):
+        <ul>
+          <li><code>TWILIO_ACCOUNT_SID</code></li>
+          <li><code>TWILIO_AUTH_TOKEN</code></li>
+          <li><code>TWILIO_FROM_NUMBER</code> (E.164, e.g., <code>+16065551234</code>)</li>
+          <li><code>AVR_USERNAME</code></li>
+          <li><code>AVR_PASSWORD</code></li>
+          <li><code>TIMEZONE</code> (use <code>America/New_York</code>)</li>
+        </ul>
+      </li>
+      <li>Commit the monitoring files to the repo:
+        <ul>
+          <li><code>monitor.py</code></li>
+          <li><code>.github/workflows/monitor.yml</code></li>
+          <li><code>config.yml</code></li>
+          <li><code>contacts.yml</code></li>
+          <li><code>docs/index.html</code> (this page)</li>
+        </ul>
+      </li>
+      <li>(Optional) Enable GitHub Pages to serve this status page from the <code>docs</code> folder.</li>
+    </ol>
+  </div>
+
+  <div class="section">
+    <p class="muted">Twilio From: <code>(set via repo secret TWILIO_FROM_NUMBER)</code></p>
+  </div>
+
+  <div class="section">
+    <h3>Contacts</h3>
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Phone</th>
+          <th>Carrier</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Reed</td>
+          <td>+16065240018</td>
+          <td>Verizon</td>
+        </tr>
+        <tr>
+          <td>Bargo</td>
+          <td>+18592292792</td>
+          <td>ATT</td>
+        </tr>
+        <tr>
+          <td>Croce</td>
+          <td>+18595399190</td>
+          <td>Verizon</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="section">
+    <p class="muted">Timezone: <code>America/New_York</code> (EST/EDT)</p>
+  </div>
+
+  <div id="content">Loading…</div>
+  <script>
+    fetch('status.json?_=' + Date.now())
+      .then(r =&gt; {
+        if (!r.ok) throw new Error('status.json not available');
+        return r.json();
+      })
+      .then(d =&gt; {
+        const el = document.getElementById('content');
+        const ok = d.alert_triggered ? 'bad' : 'ok';
+        const c60 = d.counts &amp;&amp; typeof d.counts["60"] === 'number' ? d.counts["60"] : 0;
+        const c90 = d.counts &amp;&amp; typeof d.counts["90"] === 'number' ? d.counts["90"] : 0;
+        const c120 = d.counts &amp;&amp; typeof d.counts["120"] === 'number' ? d.counts["120"] : 0;
+        const total = typeof d.total_ctmr_60_90_120 === 'number' ? d.total_ctmr_60_90_120 : (c60 + c90 + c120);
+        const twilioFrom = (d.twilio &amp;&amp; (d.twilio.from_e164 || d.twilio.from || d.twilio.fromE164)) || '(pending setup)';
+        el.innerHTML = `
+          <p><strong>Timestamp:</strong> ${d.timestamp} (${d.timezone})</p>
+          <p><strong>Allowed window now:</strong> <span class="${d.allowed_window ? 'ok' : 'bad'}">${d.allowed_window}</span></p>
+          <p><strong>Counts:</strong> 60m=${c60}, 90m=${c90}, 120m=${c120}, total=${total}</p>
+          <p><strong>Alert triggered:</strong> <span class="${ok}">${d.alert_triggered}</span></p>
+          ${d.alert_triggered ? `<p><strong>Message:</strong> <code>${d.message}</code></p>` : ""}
+          <div class="section">
+            <h3>Notification</h3>
+            <ul>
+              <li>Twilio From: <code>${twilioFrom}</code></li>
+            </ul>
+          </div>
+          <h3>Scrape Info</h3>
+          <ul>
+            <li>Rows seen: ${d.scrape &amp;&amp; d.scrape.rows_seen !== undefined ? d.scrape.rows_seen : 'n/a'}</li>
+            <li>CT/MR considered: ${d.scrape &amp;&amp; d.scrape.ctmr_considered !== undefined ? d.scrape.ctmr_considered : 'n/a'}</li>
+            <li>Errors: ${d.scrape &amp;&amp; d.scrape.errors &amp;&amp; d.scrape.errors.length ? d.scrape.errors.join('; ') : '(none)'}</li>
+          </ul>
+          <p>Artifacts: <a href="last_page.html">last_page.html</a>, <a href="last_screenshot.png">last_screenshot.png</a></p>
+        `;
+      })
+      .catch(e =&gt; {
+        document.getElementById('content').innerHTML = `
+          <div class="section">
+            <h3>Repository/Workflow Status</h3>
+            <p class="bad">No status.json yet. The repository may not be created or the workflow has not run.</p>
+            <ul>
+              <li>Expected repo: <code>DelphiData/avr-radiologist-alert</code></li>
+              <li>Create the repo and add the required secrets, then the hourly workflow will publish status here.</li>
+              <li>Quick create: <a href="https://github.com/new?name=avr-radiologist-alert&amp;visibility=private">Create avr-radiologist-alert</a></li>
+            </ul>
+          </div>
+        `;
+      });
+  </script>
+</body>
+</html>
+        
+        
+        
