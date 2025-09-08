@@ -1,0 +1,37 @@
+timezone: America/New_York
+
+threshold:
+  total_min: 20
+
+buckets: [60, 90, 120]
+
+modalities:
+  - CT
+  - MR
+  - MRI
+
+windows:
+  - name: weekdays_evening
+    days: [Mon, Tue, Wed, Thu, Fri]
+    start: "18:00"
+    end: "23:59"
+  - name: saturday
+    days: [Sat]
+    start: "04:00"
+    end: "23:59"
+  - name: sunday
+    days: [Sun]
+    start: "00:00"
+    end: "21:00"
+
+site:
+  login_url: "https://avrteleris.com/AVR/Index.aspx"
+  selectors:
+    username: "input[type='text']"
+    password: "input[type='password']"
+    submit: "input[type='submit'], button[type='submit'], text=Login"
+  table_hint: "table"
+
+# Optional mapping from row background color to bucket ceiling minutes.
+# After the first discovery run, I’ll read back any colors we see and fill this out.
+color_map: {}
