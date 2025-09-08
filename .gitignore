@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Playwright
+playwright-report/
+test-results/
+
+# Local artifacts
+*.log
+
+# Allow docs to be committed for dashboard updates
