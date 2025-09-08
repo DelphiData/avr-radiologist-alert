@@ -1,6 +1,6 @@
 import os
 import json
-from datetime import datetime, time
+from datetime import datetime
 from zoneinfo import ZoneInfo
 from twilio.rest import Client
 import yaml
@@ -23,6 +23,12 @@ def allowed_window_now(tz):
         return h < 21
     return False
 
+def truthy(val: str) -> bool:
+    if val is None:
+        return False
+    v = str(val).strip().lower()
+    return v not in ("", "0", "false", "no", "off", "none", "null")
+
 def main():
     tz_name = os.environ.get("TIMEZONE", "America/New_York")
     tz = ZoneInfo(tz_name)
@@ -40,7 +46,7 @@ def main():
     total = c60 + c90 + c120
 
     allowed = allowed_window_now(tz)
-    should_alert = allowed and total >= threshold
+    force_alert = truthy(os.environ.get("FORCE_ALERT", ""))
 
     twilio_sid = os.environ.get("TWILIO_ACCOUNT_SID", "")
     twilio_token = os.environ.get("TWILIO_AUTH_TOKEN", "")
@@ -55,7 +61,16 @@ def main():
     last_error_code = None
     last_error_message = ""
 
-    msg = f"CT/MR backlog 60/90/120 total={total} (>={threshold} threshold). Notifying: " + ", ".join([r["name"] for r in recipients]) if recipients else "No recipients configured"
+    should_alert = ((allowed and total >= threshold) or force_alert)
+
+    msg_prefix = "FORCED " if force_alert else ""
+    msg = f"{msg_prefix}CT/MR backlog 60/90/120 total={total} (>= {threshold} threshold). Notifying: " + ", ".join([r["name"] for r in recipients]) if recipients else "No recipients configured"
+
+    print(f"[INFO] Timezone: {tz_name}, now={datetime.now(tz).strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"[INFO] Allowed window now: {allowed} ({allowed_desc})")
+    print(f"[INFO] Counts: 60={c60}, 90={c90}, 120={c120}, total={total}, threshold={threshold}")
+    print(f"[INFO] Force alert: {force_alert}")
+    print(f"[INFO] Recipients configured: {len(recipients)}")
 
     if should_alert and twilio_sid and twilio_token and twilio_from and recipients:
         try:
@@ -66,14 +81,19 @@ def main():
                     sent.append({"name": r["name"], "phone": r["phone"]})
                     last_msg_sid = getattr(m, "sid", "") or ""
                     last_status = getattr(m, "status", "") or ""
+                    print(f"[INFO] SMS queued for {r['name']} {r['phone']} sid={last_msg_sid} status={last_status}")
                 except Exception as ex:
                     failed.append({"name": r["name"], "phone": r["phone"], "error": str(ex)})
+                    print(f"[ERROR] Failed to send to {r['name']} {r['phone']}: {ex}")
         except Exception as ex:
             notify_errors.append(str(ex))
+            print(f"[ERROR] Twilio client error: {ex}")
     elif should_alert and not (twilio_sid and twilio_token and twilio_from):
         notify_errors.append("Twilio not configured in secrets")
+        print("[WARN] Twilio not configured; set TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER")
     elif should_alert and not recipients:
         notify_errors.append("No recipients in contacts.yml")
+        print("[WARN] No recipients found in contacts.yml")
 
     data = {
         "timestamp": datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S"),
@@ -98,6 +118,7 @@ def main():
 
     with open("status.json", "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
+    print("[INFO] Wrote status.json")
 
 if __name__ == "__main__":
     main()
