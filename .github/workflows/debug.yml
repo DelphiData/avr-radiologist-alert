@@ -1,0 +1,36 @@
+name: Workflow Diagnostics
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    env:
+      AVR_USERNAME: ${{ secrets.AVR_USERNAME }}
+      AVR_PASSWORD: ${{ secrets.AVR_PASSWORD }}
+      TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
+      TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
+      TWILIO_FROM_NUMBER: ${{ secrets.TWILIO_FROM_NUMBER }}
+      TIMEZONE: ${{ secrets.TIMEZONE }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Show repo info
+        run: |
+          echo "Ref: ${{ github.ref }}"
+          echo "Default branch: ${{ github.event.repository.default_branch }}"
+          echo "Workflow files present:"
+          ls -la .github/workflows || true
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Secrets presence (masked)
+        run: |
+          python - <<'PY'
+          import os
+          keys = ["AVR_USERNAME","AVR_PASSWORD","TWILIO_ACCOUNT_SID","TWILIO_AUTH_TOKEN","TWILIO_FROM_NUMBER","TIMEZONE"]
+          for k in keys:
+              print(f"{k} present: {bool(os.environ.get(k,''))}")
+          PY
