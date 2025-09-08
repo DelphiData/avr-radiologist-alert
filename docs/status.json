@@ -1,0 +1,35 @@
+{
+  "timestamp": "2025-09-08 13:22:19",
+  "timezone": "America/New_York",
+  "allowed_window": false,
+  "counts": {
+    "60": 8,
+    "90": 7,
+    "120": 6
+  },
+  "total_ctmr_60_90_120": 21,
+  "alert_triggered": false,
+  "message": "CT/MR backlog 60/90/120 total=21 (>=20 threshold). Notifying: Reed, Bargo, Croce",
+  "config": {
+    "threshold_total": 20,
+    "allowed_window_desc": "Mon\u2013Fri 6pm\u201311pm, Sat 4am\u2013Sun 9pm"
+  },
+  "contacts_total": 3,
+  "notification": {
+    "recipients_sent": [],
+    "recipients_failed": [],
+    "errors": []
+  },
+  "twilio": {
+    "from_e164": "1 839 274 7945",
+    "message_sid": "",
+    "status": "",
+    "error_code": null,
+    "error_message": ""
+  },
+  "scrape": {
+    "rows_seen": null,
+    "ctmr_considered": null,
+    "errors": []
+  }
+}
