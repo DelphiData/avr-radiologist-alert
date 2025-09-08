@@ -1,0 +1,10 @@
+radiologists:
+  - name: "Reed"
+    phone: "+16065240018"
+    carrier: "verizon"
+  - name: "Bargo"
+    phone: "+18592292792"
+    carrier: "att"
+  - name: "Croce"
+    phone: "+18595399190"
+    carrier: "verizon"
