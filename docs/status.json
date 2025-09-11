@@ -1,14 +1,14 @@
 {
-  "timestamp": "2025-09-10 21:56:50",
+  "timestamp": "2025-09-10 23:05:18",
   "timezone": "America/New_York",
-  "allowed_window": true,
+  "allowed_window": false,
   "counts": {
     "60": 8,
     "90": 7,
     "120": 6
   },
   "total_ctmr_60_90_120": 21,
-  "alert_triggered": true,
+  "alert_triggered": false,
   "message": "CT/MR backlog 60/90/120 total=21 (>= 20 threshold). Notifying: Reed, Bargo, Croce",
   "config": {
     "threshold_total": 20,
@@ -16,27 +16,14 @@
   },
   "contacts_total": 3,
   "notification": {
-    "recipients_sent": [
-      {
-        "name": "Reed",
-        "phone": "+16065240018"
-      },
-      {
-        "name": "Bargo",
-        "phone": "+18592292792"
-      },
-      {
-        "name": "Croce",
-        "phone": "+18595399190"
-      }
-    ],
+    "recipients_sent": [],
     "recipients_failed": [],
     "errors": []
   },
   "twilio": {
     "from_e164": "1 839 274 7945",
-    "message_sid": "SM57a048890ecbd197b0b312c21a3699cf",
-    "status": "queued",
+    "message_sid": "",
+    "status": "",
     "error_code": null,
     "error_message": ""
   },
