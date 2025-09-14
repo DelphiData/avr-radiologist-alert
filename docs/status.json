@@ -1,5 +1,5 @@
 {
-  "timestamp": "2025-09-14 12:26:05",
+  "timestamp": "2025-09-14 13:18:21",
   "timezone": "America/New_York",
   "allowed_window": true,
   "counts": {
@@ -35,7 +35,7 @@
   },
   "twilio": {
     "from_e164": "1 839 274 7945",
-    "message_sid": "SMf6eb6173ecbc1a8dcfac512396f48c36",
+    "message_sid": "SM05a32b5d65a420c6fd25b9abcd86848a",
     "status": "queued",
     "error_code": null,
     "error_message": ""
