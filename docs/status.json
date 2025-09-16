@@ -1,5 +1,5 @@
 {
-  "timestamp": "2025-09-16 18:22:05",
+  "timestamp": "2025-09-16 18:53:49",
   "timezone": "America/New_York",
   "allowed_window": true,
   "counts": {
@@ -26,10 +26,10 @@
         {
           "chat_id": "-1002715508335",
           "ok": true,
-          "response": "{\"ok\":true,\"result\":{\"message_id\":14,\"from\":{\"id\":8315689868,\"is_bot\":true,\"first_name\":\"AVR Radiologist Alerts\",\"username\":\"avr_radiology_alerts_bot\"},\"chat\":{\"id\":-1002715508335,\"title\":\"Joey, Harold, K and AVR Radiologist Alerts\",\"type\":\"supergroup\"},\"date\":1758061326,\"text\":\"CT/MR backlog 60/90/120 total=21 (>= 20 threshold). Notifying: Reed, Bargo, Croce\"}}"
+          "response": "{\"ok\":true,\"result\":{\"message_id\":16,\"from\":{\"id\":8315689868,\"is_bot\":true,\"first_name\":\"AVR Radiologist Alerts\",\"username\":\"avr_radiology_alerts_bot\"},\"chat\":{\"id\":-1002715508335,\"title\":\"Joey, Harold, K and AVR Radiologist Alerts\",\"type\":\"supergroup\"},\"date\":1758063230,\"text\":\"CT/MR backlog 60/90/120 total=21 (>= 20 threshold). Notifying: Reed, Bargo, Croce\"}}"
         }
       ],
-      "time_utc": "2025-09-16T22:22:06.841793Z",
+      "time_utc": "2025-09-16T22:53:50.893126Z",
       "recipients": [
         "-1002715508335"
       ]
