@@ -1,5 +1,5 @@
 {
-  "timestamp": "2025-09-16 19:24:46",
+  "timestamp": "2025-09-16 19:40:08",
   "timezone": "America/New_York",
   "allowed_window": true,
   "counts": {
@@ -18,22 +18,13 @@
   "notification": {
     "recipients_sent": [],
     "recipients_failed": [],
-    "errors": [
-      "Twilio not configured in secrets"
-    ]
-  },
-  "twilio": {
-    "from_e164": "",
-    "message_sid": "",
-    "status": "",
-    "error_code": null,
-    "error_message": ""
+    "errors": []
   },
   "scrape": {
     "rows_seen": 0,
     "ctmr_considered": 0,
     "errors": [
-      "fetch: RuntimeError: Failed to login/fetch Worklist. Last error: No login form found",
+      "fetch: RuntimeError: Failed to login/fetch Worklist. Last error: HTTPError: 404 Client Error: Not Found for url: https://avrteleris.com/AVR/Login.aspx",
       "no HTML fetched"
     ],
     "base_url": ""
