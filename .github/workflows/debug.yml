@@ -6,7 +6,7 @@ on:
       action:
         description: "ids = list chat IDs, test = send test msg, run-monitor = run scraper+alert"
         required: true
-        default: "test"
+        default: "run-monitor"
         type: choice
         options:
           - ids
@@ -55,7 +55,7 @@ jobs:
           print("FORCE_ALERT:", os.environ.get("FORCE_ALERT",""))
           PY
 
-      # ===== IDs mode =====
+      # -------- IDs mode --------
       - name: Telegram getMe
         if: ${{ github.event.inputs.action == 'ids' }}
         run: |
@@ -93,7 +93,18 @@ jobs:
           [[ "$U" == @* ]] || U="@${U}"
           curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getChat?chat_id=$U" | jq .
 
-      # ===== Test mode =====
+      # -------- Setup Python + deps (always, so run-monitor never misses packages) --------
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies (always)
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests beautifulsoup4 pytz pyyaml twilio
+
+      # -------- Test mode --------
       - name: Send Telegram test message
         if: ${{ github.event.inputs.action == 'test' }}
         run: |
@@ -106,23 +117,7 @@ jobs:
               --data-urlencode "text=${{ github.event.inputs.message }}" | jq .
           done
 
-      # ===== Run monitor mode =====
-      - name: Setup Python
-        if: ${{ github.event.inputs.action == 'run-monitor' }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install deps
-        if: ${{ github.event.inputs.action == 'run-monitor' }}
-        run: |
-          python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then
-            pip install -r requirements.txt
-          else
-            pip install requests pyyaml pytz beautifulsoup4 twilio
-          fi
-
+      # -------- Run monitor mode --------
       - name: Run monitor.py (creates/updates status.json)
         if: ${{ github.event.inputs.action == 'run-monitor' }}
         run: |
@@ -143,6 +138,7 @@ jobs:
           path: |
             status.json
             docs/last_page.html
+            docs/last_counts.csv
             docs/last_screenshot.png
           if-no-files-found: ignore
           retention-days: 7
