@@ -1,40 +1,56 @@
 #!/usr/bin/env python3
 """
-AVR Radiologist Alerts - monitor.py
+AVR Radiologist Alerts - monitor.py (Telegram-only, robust login + CT/MR parser)
 
-What this script does:
-- Logs into AVR
-- Fetches the Worklist page (NOT Completed Studies)
-- Counts only CT/MR studies that are aged 60–89, 90–119, 120+ minutes
-- Writes status.json used by the Telegram sender workflow step
-- Saves debug snapshots (docs/last_page.html, docs/last_counts.csv) so we can validate parsing
+- Logs into AVR (handles Index.aspx -> Login.aspx, meta/JS redirects, ASP.NET inputs)
+- Fetches the Worklist page (excludes Completed Studies)
+- Counts only CT/MR aged 60–89, 90–119, 120+ minutes (each CT/MR in a cell counted)
+- Writes status.json used by Telegram sender
+- Saves debug snapshots: docs/last_page.html and docs/last_counts.csv
+
+Environment:
+  AVR_USERNAME, AVR_PASSWORD, TIMEZONE, FORCE_ALERT
 """
 
 import os
 import re
 import csv
 import json
-import time
 import pytz
 import yaml
 import datetime as dt
-from typing import Tuple, Dict, Any, List
+from typing import Tuple, Dict, Any, List, Optional
 
 import requests
 from bs4 import BeautifulSoup
 
+# ---------------- Config ----------------
 
 BASE_URLS = [
     "https://www.avrteleris.com/AVR",
     "https://avrteleris.com/AVR",
 ]
+
 INDEX_PATH = "Index.aspx"
-WORKLIST_PATH = "Forms/Worklist/worklist.aspx"
+WORKLIST_PATHS = [
+    "Forms/Worklist/worklist.aspx",
+    "Forms/Worklist/Worklist.aspx",  # case variation
+]
+
+LOGIN_CANDIDATES = [
+    "Login.aspx",
+    "login.aspx",
+    "Forms/Login.aspx",
+    "Account/Login.aspx",
+    "Default.aspx",
+]
 
 DEFAULT_TZ = "America/New_York"
 DEFAULT_THRESHOLD = 20
 
-# ---------- Helpers ----------
+UA = "Mozilla/5.0 (X11; Linux x86_64) AVR Monitor"
+
+# ---------------- Helpers ----------------
 
 def env_truthy(name: str, default: str = "false") -> bool:
     v = os.getenv(name, default)
@@ -45,21 +61,17 @@ def now_in_tz(tzname: str) -> dt.datetime:
     return dt.datetime.now(tz)
 
 def allowed_window(now_local: dt.datetime) -> bool:
-    # Windows:
-    # - Mon–Fri: 6:00 pm–11:59 pm
-    # - Sat: 4:00 am–11:59 pm
-    # - Sun: 12:00 am–9:00 pm
-    wd = now_local.weekday()  # Mon=0 ... Sun=6
+    # Mon–Fri 6:00 pm–11:59 pm; Sat 4:00 am–11:59 pm; Sun 12:00 am–9:00 pm
+    wd = now_local.weekday()  # Mon=0 .. Sun=6
     t = now_local.time()
 
-    def between(t0: dt.time, t1: dt.time) -> bool:
-        return (t >= t0) and (t <= t1)
+    def between(a: dt.time, b: dt.time) -> bool:
+        return a <= t <= b
 
-    if 0 <= wd <= 4:  # Mon–Fri
+    if 0 <= wd <= 4:
         return between(dt.time(18, 0), dt.time(23, 59, 59))
-    if wd == 5:  # Sat
+    if wd == 5:
         return between(dt.time(4, 0), dt.time(23, 59, 59))
-    # Sun
     return between(dt.time(0, 0), dt.time(21, 0))
 
 def read_yaml(path: str, default: Any) -> Any:
@@ -78,138 +90,174 @@ def safe_write_status(status: Dict[str, Any]):
     with open("status.json", "w", encoding="utf-8") as f:
         json.dump(status, f, indent=2, ensure_ascii=False)
 
+# ---------------- Login helpers ----------------
 
-# ---------- Login & fetch ----------
+def _abs_url(base: str, path: str) -> str:
+    if path.startswith("http://") or path.startswith("https://"):
+        return path
+    if path.startswith("/"):
+        from urllib.parse import urlsplit, urlunsplit
+        sp = urlsplit(base)
+        return urlunsplit((sp.scheme, sp.netloc, path, "", ""))
+    return f"{base.rstrip('/')}/{path.lstrip('/')}"
+
+def _extract_meta_js_redirect(html: str) -> Optional[str]:
+    soup = BeautifulSoup(html, "html.parser")
+    for m in soup.find_all("meta"):
+        if m.get("http-equiv", "").lower() == "refresh":
+            content = m.get("content", "")
+            m2 = re.search(r"url=(.+)", content, flags=re.I)
+            if m2:
+                return m2.group(1).strip().strip("'\"")
+    m = re.search(r"location\.(?:href|replace)\(['\"]([^'\"]+)['\"]\)", html, flags=re.I)
+    if m:
+        return m.group(1).strip()
+    m = re.search(r"window\.location\s*=\s*['\"]([^'\"]+)['\"]", html, flags=re.I)
+    if m:
+        return m.group(1).strip()
+    return None
+
+def _find_login_form(soup: BeautifulSoup):
+    for form in soup.find_all("form"):
+        if form.find("input", {"type": "password"}):
+            return form
+    return None
+
+def _build_form_payload(form, username: str, password: str) -> Dict[str, str]:
+    payload: Dict[str, str] = {}
+    for inp in form.find_all("input"):
+        name = inp.get("name")
+        if not name:
+            continue
+        payload[name] = inp.get("value", "")
+
+    def set_best(names: List[str], value: str) -> bool:
+        ok = False
+        for cand in names:
+            for k in list(payload.keys()):
+                if k.lower() == cand.lower():
+                    payload[k] = value
+                    ok = True
+        return ok
+
+    user_set = set_best(["username", "user", "userid", "login", "txtusername", "ctl00$maincontent$txtusername"], username)
+    pass_set = set_best(["password", "pwd", "pass", "txtpassword", "ctl00$maincontent$txtpassword"], password)
+
+    if not user_set:
+        for inp in form.find_all("input"):
+            t = (inp.get("type") or "").lower()
+            if t in ("text", "email"):
+                n = inp.get("name")
+                if n:
+                    payload[n] = username
+                    user_set = True
+                    break
+    if not pass_set:
+        for inp in form.find_all("input"):
+            t = (inp.get("type") or "").lower()
+            if t == "password":
+                n = inp.get("name")
+                if n:
+                    payload[n] = password
+                    pass_set = True
+                    break
+
+    for inp in form.find_all("input"):
+        if (inp.get("type") or "").lower() in ("submit", "button"):
+            n = inp.get("name")
+            if n and n not in payload:
+                payload[n] = inp.get("value", "") or "Login"
+    return payload
+
+def _get_worklist(session: requests.Session, base: str, headers: Dict[str, str]) -> str:
+    last_exc = None
+    for p in WORKLIST_PATHS:
+        try:
+            r = session.get(_abs_url(base, p), headers=headers, timeout=30)
+            r.raise_for_status()
+            return r.text
+        except Exception as e:
+            last_exc = e
+    if last_exc:
+        raise last_exc
+    raise RuntimeError("Unable to fetch Worklist")
 
 def try_login_and_fetch_worklist(session: requests.Session, username: str, password: str) -> Tuple[str, str]:
-    """
-    Returns (final_base_url, worklist_html).
-    Tries both www and bare domains. Handles generic ASP.NET forms by copying inputs.
-    """
-    headers = {
-        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AVR Monitor",
-    }
-
+    headers = {"User-Agent": UA}
     last_error = ""
+
     for base in BASE_URLS:
         try:
-            # Step 1: Hit Index.aspx
             idx_url = f"{base}/{INDEX_PATH}"
-            r = session.get(idx_url, headers=headers, timeout=30)
+            r = session.get(idx_url, headers=headers, timeout=30, allow_redirects=True)
             r.raise_for_status()
             html = r.text
 
-            # If already logged in, go to Worklist
-            if "Logout" in html or "Worklist" in html:
-                wl_url = f"{base}/{WORKLIST_PATH}"
-                w = session.get(wl_url, headers=headers, timeout=30)
-                w.raise_for_status()
-                return base, w.text
+            redir = _extract_meta_js_redirect(html)
+            if redir:
+                r = session.get(_abs_url(base, redir), headers=headers, timeout=30, allow_redirects=True)
+                r.raise_for_status()
+                html = r.text
 
-            # Otherwise, attempt to find a login form with a password field
+            if ("Logout" in html and "Worklist" in html) or "Logged In:" in html:
+                return base, _get_worklist(session, base, headers)
+
             soup = BeautifulSoup(html, "html.parser")
-            login_form = None
-            for form in soup.find_all("form"):
-                if form.find("input", {"type": "password"}):
-                    login_form = form
-                    break
+            form = _find_login_form(soup)
 
-            if not login_form:
-                # Try a direct Worklist GET; some sites redirect to login automatically
-                wl_url = f"{base}/{WORKLIST_PATH}"
-                w = session.get(wl_url, headers=headers, timeout=30)
-                w.raise_for_status()
-                if "Logout" in w.text or "Worklist" in w.text:
-                    return base, w.text
-                # Fall through to parse for login
-                soup = BeautifulSoup(w.text, "html.parser")
-                login_form = None
-                for form in soup.find_all("form"):
-                    if form.find("input", {"type": "password"}):
-                        login_form = form
+            if not form:
+                for cand in LOGIN_CANDIDATES:
+                    url = _abs_url(base, cand)
+                    r2 = session.get(url, headers=headers, timeout=30, allow_redirects=True)
+                    r2.raise_for_status()
+                    html2 = r2.text
+                    red = _extract_meta_js_redirect(html2)
+                    if red:
+                        r2 = session.get(_abs_url(base, red), headers=headers, timeout=30, allow_redirects=True)
+                        r2.raise_for_status()
+                        html2 = r2.text
+                    soup2 = BeautifulSoup(html2, "html.parser")
+                    form = _find_login_form(soup2)
+                    if form:
+                        html = html2
                         break
 
-            if not login_form:
+            if not form:
                 last_error = "No login form found"
                 continue
 
-            # Build payload: include all inputs + username/password overrides
-            payload = {}
-            for inp in login_form.find_all("input"):
-                name = inp.get("name")
-                if not name:
-                    continue
-                val = inp.get("value", "")
-                payload[name] = val
+            payload = _build_form_payload(form, username, password)
+            action = form.get("action") or ""
+            post_url = _abs_url(base, action or "Login.aspx")
+            headers_post = dict(headers)
+            headers_post["Referer"] = r.url
 
-            # Best-guess username/password field names
-            # Try explicit name matches first
-            def set_best(name_candidates: List[str], value: str):
-                set_ok = False
-                for cand in name_candidates:
-                    for key in list(payload.keys()):
-                        if key.lower() == cand.lower():
-                            payload[key] = value
-                            set_ok = True
-                return set_ok
+            r3 = session.post(post_url, data=payload, headers=headers_post, timeout=30, allow_redirects=True)
+            r3.raise_for_status()
+            html3 = r3.text
 
-            user_set = set_best(["username", "user", "userid", "login", "txtUserName", "ctl00$MainContent$txtUserName"], username)
-            pass_set = set_best(["password", "pwd", "pass", "txtPassword", "ctl00$MainContent$txtPassword"], password)
+            red3 = _extract_meta_js_redirect(html3)
+            if red3:
+                r3 = session.get(_abs_url(base, red3), headers=headers, timeout=30, allow_redirects=True)
+                r3.raise_for_status()
 
-            # If not set, heuristically assign to first text/password fields
-            if not user_set:
-                for inp in login_form.find_all("input"):
-                    if inp.get("type", "").lower() in ("text", "email"):
-                        n = inp.get("name")
-                        if n and ("user" in n.lower() or "login" in n.lower()):
-                            payload[n] = username
-                            user_set = True
-                            break
-            if not pass_set:
-                for inp in login_form.find_all("input"):
-                    if inp.get("type", "").lower() == "password":
-                        n = inp.get("name")
-                        if n:
-                            payload[n] = password
-                            pass_set = True
-                            break
-
-            action = login_form.get("action") or ""
-            if not action.startswith("http"):
-                # Resolve relative action
-                if action.startswith("/"):
-                    post_url = f"{base}{action}"
-                else:
-                    post_url = f"{base}/{action or INDEX_PATH}"
-            else:
-                post_url = action
-
-            r2 = session.post(post_url, data=payload, headers=headers, timeout=30)
-            r2.raise_for_status()
-
-            # After login, go to Worklist
-            wl_url = f"{base}/{WORKLIST_PATH}"
-            w = session.get(wl_url, headers=headers, timeout=30)
-            w.raise_for_status()
-            return base, w.text
+            return base, _get_worklist(session, base, headers)
 
         except Exception as e:
             last_error = f"{type(e).__name__}: {e}"
 
     raise RuntimeError(f"Failed to login/fetch Worklist. Last error: {last_error}")
 
-
-# ---------- Parser ----------
+# ---------------- Parser ----------------
 
 def parse_worklist_counts(html: str, now_local: dt.datetime, tz) -> Tuple[Dict[str, int], Dict[str, Any]]:
     """
-    Only parse the Worklist table; ignore 'Completed Studies'.
-    Count only CT/MR; multiple CT/MR in one cell counted individually.
-    Buckets: 60=[60..89], 90=[90..119], 120=120+ minutes; ignore < 60.
+    Parse only the Worklist table (header includes 'Study Requested' and not 'Report Out Time').
+    Count only CT/MR; multiple CT/MR in a single cell counted individually.
+    Buckets: 60=[60..89], 90=[90..119], 120=120+; ignore <60.
     """
     soup = BeautifulSoup(html, "html.parser")
 
-    # Find the Worklist table: must contain "Study Requested" but NOT "Report Out Time"
     work_table = None
     for t in soup.find_all("table"):
         headers = " ".join(th.get_text(" ", strip=True) for th in t.find_all("th"))
@@ -227,7 +275,6 @@ def parse_worklist_counts(html: str, now_local: dt.datetime, tz) -> Tuple[Dict[s
         errors.append("worklist table not found")
         return counts, {"rows_seen": 0, "ctmr_considered": 0, "errors": errors, "included_rows": []}
 
-    # date format example: "Sep 16, 2025", time example: "19:02:58"
     def parse_req_dt(date_str: str, time_str: str):
         try:
             dt_naive = dt.datetime.strptime(f"{date_str} {time_str}", "%b %d, %Y %H:%M:%S")
@@ -250,9 +297,7 @@ def parse_worklist_counts(html: str, now_local: dt.datetime, tz) -> Tuple[Dict[s
         study_cell_raw = tds[6].get_text(" ", strip=True)
         study_upper = study_cell_raw.upper()
 
-        # Split into potential studies; keep only CT/MR
         parts = [p.strip() for p in re.split(r"[;,/]|\\band\\b", study_upper) if p.strip()]
-        # Keep CT or MR(I)
         parts = [p for p in parts if re.search(r"\\bCT\\b", p) or re.search(r"\\bMR(I)?\\b", p)]
         if not parts:
             continue
@@ -272,26 +317,25 @@ def parse_worklist_counts(html: str, now_local: dt.datetime, tz) -> Tuple[Dict[s
         else:
             bucket = "60"
 
-        inc = len(parts)  # count each CT/MR listed in the cell
+        inc = len(parts)
         counts[bucket] += inc
         considered += inc
         included_rows.append({
             "bucket": bucket,
             "age_min": minutes,
             "patient": patient,
-            "study_cell": study_cell_raw
+            "study_cell": study_cell_raw,
         })
 
     debug = {
         "rows_seen": rows_seen,
         "ctmr_considered": considered,
         "errors": errors,
-        "included_rows": included_rows
+        "included_rows": included_rows,
     }
     return counts, debug
 
-
-# ---------- Main ----------
+# ---------------- Main ----------------
 
 def main():
     username = os.getenv("AVR_USERNAME", "").strip()
@@ -306,37 +350,28 @@ def main():
     allowed = allowed_window(now_local)
     print(f"[INFO] Allowed window now: {allowed} (Mon–Fri 6pm–11pm, Sat 4am–Sun 9pm)")
 
-    # Load config/contacts (optional)
     cfg = read_yaml("config.yml", {}) or {}
     threshold = int(cfg.get("threshold_total", DEFAULT_THRESHOLD))
+
     contacts = read_yaml("contacts.yml", []) or []
     contact_names = [c.get("name") for c in contacts if isinstance(c, dict) and c.get("name")]
     if not contact_names:
-        # Fallback to known names used in your messages
         contact_names = ["Reed", "Bargo", "Croce"]
 
-    # Twilio presence (we do NOT send SMS here, just record presence)
-    tw_sid = os.getenv("TWILIO_ACCOUNT_SID", "")
-    tw_auth = os.getenv("TWILIO_AUTH_TOKEN", "")
-    tw_from = os.getenv("TWILIO_FROM_NUMBER", "")
-    twilio_configured = bool(tw_sid and tw_auth and tw_from)
-    if not twilio_configured:
-        print("[WARN] Twilio not configured; set TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER")
-
-    # Fetch Worklist page
+    # Fetch Worklist
     errors: List[str] = []
     html = ""
     base_used = ""
 
     try:
         with requests.Session() as s:
+            s.headers.update({"User-Agent": UA})
             base_used, html = try_login_and_fetch_worklist(s, username, password)
     except Exception as e:
         err = f"fetch: {type(e).__name__}: {e}"
         print(f"[ERROR] {err}")
         errors.append(err)
 
-    # Parse counts
     counts = {"60": 0, "90": 0, "120": 0}
     debug = {"rows_seen": 0, "ctmr_considered": 0, "errors": [], "included_rows": []}
     if html:
@@ -349,7 +384,7 @@ def main():
     print(f"[INFO] Force alert: {force_alert}")
     print(f"[INFO] Recipients configured: {len(contact_names)}")
 
-    # Save debug snapshots
+    # Debug snapshots
     try:
         os.makedirs("docs", exist_ok=True)
         if html:
@@ -362,7 +397,7 @@ def main():
     except Exception as e:
         print(f"[WARN] Failed to save debug snapshots: {e}")
 
-    # Compose status
+    # Status
     alert_ok = (total >= threshold) and allowed
     if force_alert:
         alert_ok = True
@@ -383,17 +418,10 @@ def main():
         },
         "contacts_total": len(contact_names),
         "notification": {
+            # scripts/send_telegram.py will append delivery results under "telegram"
             "recipients_sent": [],
             "recipients_failed": [],
-            "errors": ([] if twilio_configured else ["Twilio not configured in secrets"]),
-            # 'telegram' results will be appended by scripts/send_telegram.py
-        },
-        "twilio": {
-            "from_e164": tw_from or "",
-            "message_sid": "",
-            "status": "",
-            "error_code": None,
-            "error_message": "",
+            "errors": [],
         },
         "scrape": {
             "rows_seen": debug.get("rows_seen"),
@@ -405,7 +433,6 @@ def main():
 
     safe_write_status(status)
     print("[INFO] Wrote status.json")
-
 
 if __name__ == "__main__":
     main()
