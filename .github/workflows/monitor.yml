@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       force_alert:
-        description: "Force alert (bypass window/threshold) for testing"
+        description: "Force alert (true/false)"
         required: false
         default: "false"
   schedule:
@@ -25,9 +25,9 @@ jobs:
       AVR_USERNAME: ${{ secrets.AVR_USERNAME }}
       AVR_PASSWORD: ${{ secrets.AVR_PASSWORD }}
       TIMEZONE: ${{ secrets.TIMEZONE }}
-      FORCE_ALERT: ${{ github.event.inputs.force_alert }}
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_IDS: ${{ secrets.TELEGRAM_CHAT_IDS }}
+      FORCE_ALERT: ${{ github.event.inputs.force_alert }}
 
     steps:
       - name: Checkout
@@ -38,14 +38,13 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies (always)
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests beautifulsoup4 pytz pyyaml twilio
+          pip install requests beautifulsoup4 pytz pyyaml
 
       - name: Preflight diagnostics
         run: |
-          echo "Branch: ${{ github.ref }}"
           python - <<'PY'
           import os
           for k in ["AVR_USERNAME","AVR_PASSWORD","TIMEZONE","TELEGRAM_BOT_TOKEN","TELEGRAM_CHAT_IDS"]:
@@ -54,13 +53,11 @@ jobs:
           PY
 
       - name: Run monitor
-        run: |
-          python monitor.py
+        run: python monitor.py
 
-      - name: Send Telegram alert (reads status.json)
+      - name: Send Telegram alert
         if: always()
-        run: |
-          python scripts/send_telegram.py
+        run: python scripts/send_telegram.py
 
       - name: Upload status.json artifact
         if: always()
