@@ -8,10 +8,7 @@ on:
         required: true
         default: "run-monitor"
         type: choice
-        options:
-          - ids
-          - test
-          - run-monitor
+        options: [ids, test, run-monitor]
       message:
         description: "Test message text (used when action=test)"
         required: false
@@ -44,80 +41,69 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Preflight diagnostics
-        run: |
-          echo "Ref: ${{ github.ref }}"
-          echo "Action: ${{ github.event.inputs.action }}"
-          python - <<'PY'
-          import os
-          for k in ["AVR_USERNAME","AVR_PASSWORD","TIMEZONE","TELEGRAM_BOT_TOKEN","TELEGRAM_CHAT_IDS"]:
-              print(f"{k} present:", bool(os.environ.get(k,"")))
-          print("FORCE_ALERT:", os.environ.get("FORCE_ALERT",""))
-          PY
-
-      # -------- IDs mode --------
-      - name: Telegram getMe
-        if: ${{ github.event.inputs.action == 'ids' }}
-        run: |
-          curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe" | jq .
-
-      - name: Telegram getUpdates (send a message in target chat first)
-        if: ${{ github.event.inputs.action == 'ids' }}
-        run: |
-          curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getUpdates" | tee updates.json | jq .
-
-      - name: Extract chat IDs from updates
-        if: ${{ github.event.inputs.action == 'ids' }}
-        run: |
-          python - <<'PY'
-          import json, sys
-          try:
-              j=json.load(open('updates.json'))
-          except Exception as e:
-              print("No updates.json or parse error:", e); sys.exit(0)
-          seen=set()
-          for r in j.get('result', []):
-              m = r.get('message') or r.get('channel_post') or r.get('edited_message') or r.get('edited_channel_post')
-              if not m: continue
-              c=m.get('chat',{})
-              cid=c.get('id'); typ=c.get('type'); name=c.get('title') or c.get('username') or ''
-              if cid in seen: continue
-              seen.add(cid)
-              print(f"{typ}\t{cid}\t{name}")
-          PY
-
-      - name: Resolve channel username (optional)
-        if: ${{ github.event.inputs.action == 'ids' && github.event.inputs.channel_username != '' }}
-        run: |
-          U="${{ github.event.inputs.channel_username }}"
-          [[ "$U" == @* ]] || U="@${U}"
-          curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getChat?chat_id=$U" | jq .
-
-      # -------- Setup Python + deps (always, so run-monitor never misses packages) --------
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install dependencies (always)
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests beautifulsoup4 pytz pyyaml twilio
+          pip install requests beautifulsoup4 pytz pyyaml
 
-      # -------- Test mode --------
+      - name: Preflight diagnostics
+        run: |
+          python - <<'PY'
+          import os
+          for k in ["AVR_USERNAME","AVR_PASSWORD","TIMEZONE","TELEGRAM_BOT_TOKEN","TELEGRAM_CHAT_IDS"]:
+              print(f"{k} present:", bool(os.environ.get(k,"")))
+          print("Action:", os.environ.get("GITHUB_ACTION_REF",""))
+          print("FORCE_ALERT:", os.environ.get("FORCE_ALERT",""))
+          PY
+
+      # -------- ids mode --------
+      - name: Telegram getMe
+        if: ${{ github.event.inputs.action == 'ids' }}
+        run: |
+          curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe" | sed -e 's/\\u[0-9a-fA-F]\\{4\\}//g'
+
+      - name: Telegram getUpdates
+        if: ${{ github.event.inputs.action == 'ids' }}
+        run: |
+          curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getUpdates" > updates.json
+          python - <<'PY'
+          import json
+          j=json.load(open('updates.json'))
+          for r in j.get('result', []):
+              m=r.get('message') or r.get('channel_post') or r.get('edited_message') or r.get('edited_channel_post')
+              if not m: continue
+              c=m.get('chat',{})
+              print(f"{c.get('type')}\t{c.get('id')}\t{c.get('title') or c.get('username') or ''}")
+          PY
+
+      - name: Resolve channel username
+        if: ${{ github.event.inputs.action == 'ids' && github.event.inputs.channel_username != '' }}
+        run: |
+          U="${{ github.event.inputs.channel_username }}"
+          [[ "$U" == @* ]] || U="@${U}"
+          curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getChat?chat_id=$U"
+
+      # -------- test mode --------
       - name: Send Telegram test message
         if: ${{ github.event.inputs.action == 'test' }}
         run: |
-          IFS=',' read -ra IDS <<< "$TELEGRAM_CHAT_IDS"
-          for ID in "${IDS[@]}"; do
-            ID="$(echo "$ID" | xargs)"
-            echo "Sending to $ID"
-            curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
-              -d chat_id="$ID" \
-              --data-urlencode "text=${{ github.event.inputs.message }}" | jq .
-          done
+          python - <<'PY'
+          import os,requests
+          token=os.environ["TELEGRAM_BOT_TOKEN"]
+          ids=[x.strip() for x in os.environ.get("TELEGRAM_CHAT_IDS","").split(",") if x.strip()]
+          msg=os.environ.get("INPUT_MESSAGE","AVR Telegram test")
+          api=f"https://api.telegram.org/bot{token}/sendMessage"
+          for cid in ids:
+              r=requests.post(api,data={"chat_id":cid,"text":msg},timeout=20)
+              print(cid,"->",r.ok,r.text[:200])
+          PY
 
-      # -------- Run monitor mode --------
+      # -------- run-monitor --------
       - name: Run monitor.py (creates/updates status.json)
         if: ${{ github.event.inputs.action == 'run-monitor' }}
         run: |
@@ -127,8 +113,7 @@ jobs:
 
       - name: Send Telegram alert via script
         if: ${{ github.event.inputs.action == 'run-monitor' }}
-        run: |
-          python scripts/send_telegram.py
+        run: python scripts/send_telegram.py
 
       - name: Upload artifacts
         if: ${{ github.event.inputs.action == 'run-monitor' }}
