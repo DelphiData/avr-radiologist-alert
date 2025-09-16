@@ -1,14 +1,14 @@
 {
-  "timestamp": "2025-09-16 17:21:39",
+  "timestamp": "2025-09-16 18:22:05",
   "timezone": "America/New_York",
-  "allowed_window": false,
+  "allowed_window": true,
   "counts": {
     "60": 8,
     "90": 7,
     "120": 6
   },
   "total_ctmr_60_90_120": 21,
-  "alert_triggered": false,
+  "alert_triggered": true,
   "message": "CT/MR backlog 60/90/120 total=21 (>= 20 threshold). Notifying: Reed, Bargo, Croce",
   "config": {
     "threshold_total": 20,
@@ -18,7 +18,22 @@
   "notification": {
     "recipients_sent": [],
     "recipients_failed": [],
-    "errors": []
+    "errors": [
+      "Twilio not configured in secrets"
+    ],
+    "telegram": {
+      "results": [
+        {
+          "chat_id": "-1002715508335",
+          "ok": true,
+          "response": "{\"ok\":true,\"result\":{\"message_id\":14,\"from\":{\"id\":8315689868,\"is_bot\":true,\"first_name\":\"AVR Radiologist Alerts\",\"username\":\"avr_radiology_alerts_bot\"},\"chat\":{\"id\":-1002715508335,\"title\":\"Joey, Harold, K and AVR Radiologist Alerts\",\"type\":\"supergroup\"},\"date\":1758061326,\"text\":\"CT/MR backlog 60/90/120 total=21 (>= 20 threshold). Notifying: Reed, Bargo, Croce\"}}"
+        }
+      ],
+      "time_utc": "2025-09-16T22:22:06.841793Z",
+      "recipients": [
+        "-1002715508335"
+      ]
+    }
   },
   "twilio": {
     "from_e164": "",
