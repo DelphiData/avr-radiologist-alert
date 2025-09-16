@@ -38,14 +38,10 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
+      - name: Install dependencies (always)
         run: |
           python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then
-            pip install -r requirements.txt
-          else
-            pip install requests pyyaml pytz beautifulsoup4 twilio
-          fi
+          pip install requests beautifulsoup4 pytz pyyaml twilio
 
       - name: Preflight diagnostics
         run: |
