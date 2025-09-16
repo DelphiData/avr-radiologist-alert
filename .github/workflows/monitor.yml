@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       force_alert:
-        description: "Force alert (true/false)"
+        description: "Force alert (bypass window/threshold) for testing"
         required: false
         default: "false"
   schedule:
@@ -25,9 +25,9 @@ jobs:
       AVR_USERNAME: ${{ secrets.AVR_USERNAME }}
       AVR_PASSWORD: ${{ secrets.AVR_PASSWORD }}
       TIMEZONE: ${{ secrets.TIMEZONE }}
+      FORCE_ALERT: ${{ github.event.inputs.force_alert }}
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_IDS: ${{ secrets.TELEGRAM_CHAT_IDS }}
-      FORCE_ALERT: ${{ github.event.inputs.force_alert }}
 
     steps:
       - name: Checkout
@@ -45,6 +45,7 @@ jobs:
 
       - name: Preflight diagnostics
         run: |
+          echo "Branch: ${{ github.ref }}"
           python - <<'PY'
           import os
           for k in ["AVR_USERNAME","AVR_PASSWORD","TIMEZONE","TELEGRAM_BOT_TOKEN","TELEGRAM_CHAT_IDS"]:
@@ -53,11 +54,99 @@ jobs:
           PY
 
       - name: Run monitor
-        run: python monitor.py
+        run: |
+          python monitor.py
 
       - name: Send Telegram alert
         if: always()
-        run: python scripts/send_telegram.py
+        run: |
+          python scripts/send_telegram.py
+
+      - name: Upload status.json artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: status-json
+          path: status.json
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Publish status.json to docs
+        if: success() || failure()
+        run: |
+          if [ -f status.json ]; then
+            mkdir -p docs
+            cp status.json docs/status.json
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add docs/status.json
+            git commit -m "Update status.json [skip ci]" || true
+            git push
+          else
+            echo "status.json not found; skipping publish"
+          finame: AVR Monitor
+
+on:
+  workflow_dispatch:
+    inputs:
+      force_alert:
+        description: "Force alert (bypass window/threshold) for testing"
+        required: false
+        default: "false"
+  schedule:
+    - cron: "0 * * * *"  # hourly
+
+permissions:
+  contents: write
+
+concurrency:
+  group: avr-monitor
+  cancel-in-progress: false
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      AVR_USERNAME: ${{ secrets.AVR_USERNAME }}
+      AVR_PASSWORD: ${{ secrets.AVR_PASSWORD }}
+      TIMEZONE: ${{ secrets.TIMEZONE }}
+      FORCE_ALERT: ${{ github.event.inputs.force_alert }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_IDS: ${{ secrets.TELEGRAM_CHAT_IDS }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests beautifulsoup4 pytz pyyaml
+
+      - name: Preflight diagnostics
+        run: |
+          echo "Branch: ${{ github.ref }}"
+          python - <<'PY'
+          import os
+          for k in ["AVR_USERNAME","AVR_PASSWORD","TIMEZONE","TELEGRAM_BOT_TOKEN","TELEGRAM_CHAT_IDS"]:
+              print(f"{k} present:", bool(os.environ.get(k,"")))
+          print("FORCE_ALERT:", os.environ.get("FORCE_ALERT",""))
+          PY
+
+      - name: Run monitor
+        run: |
+          python monitor.py
+
+      - name: Send Telegram alert
+        if: always()
+        run: |
+          python scripts/send_telegram.py
 
       - name: Upload status.json artifact
         if: always()
