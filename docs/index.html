@@ -70,4 +70,65 @@
       const el = document.getElementById('content');
       const c60 = Number((d.counts||{})["60"]||0);
       const c90 = Number((d.counts||{})["90"]||0);
-      const c120 = Number((d.counts||
+      const c120 = Number((d.counts||{})["120"]||0);
+      const total = Number(d.total_ctmr_60_90_120|| (c60+c90+c120));
+      const threshold = Number((d.config||{}).threshold_total || 20);
+      const allowedDesc = (d.config||{}).allowed_window_desc || '';
+      const okClass = d.alert_triggered ? 'bad' : 'ok';
+      const tele = (d.notification && d.notification.telegram) || {};
+      const res = Array.isArray(tele.results) ? tele.results : [];
+      const recips = tele.recipients || [];
+
+      const whyNo = [];
+      if (!d.alert_triggered){
+        if (d.allowed_window === false) whyNo.push('Outside allowed window' + (allowedDesc ? ' ('+allowedDesc+')' : ''));
+        if (total < threshold) whyNo.push('Below threshold ('+total+' < '+threshold+')');
+      }
+
+      el.innerHTML = `
+        <div class="grid">
+          <div class="card">
+            <div><span class="k">Timestamp:</span> <span class="v">${d.timestamp} (${d.timezone}) ${sampleMode ? '<span class="pill sample">Sample</span>' : ''}</span></div>
+            <div><span class="k">Allowed window:</span> <span class="${d.allowed_window ? 'ok':'bad'}">${d.allowed_window}</span> ${allowedDesc ? '<span class="muted">('+allowedDesc+')</span>':''}</div>
+            <div><span class="k">Counts:</span> <span class="v">60=${c60}, 90=${c90}, 120=${c120}, total=${total}</span></div>
+            <div><span class="k">Threshold:</span> <span class="v">${threshold}</span></div>
+            <div><span class="k">Alert triggered:</span> <span class="${okClass}">${d.alert_triggered}</span></div>
+            ${d.message ? `<div><span class="k">Message:</span> <code>${d.message}</code></div>` : ''}
+          </div>
+          <div class="card">
+            <h3>Telegram</h3>
+            <div><span class="k">Recipients:</span> ${recips.length ? recips.join(', ') : '(none)'}</div>
+            <div><span class="k">Last send (UTC):</span> ${tele.time_utc || '(n/a)'}</div>
+            <div><span class="k">Results:</span></div>
+            <ul class="list">
+              ${res.length ? res.map(r => `<li>${r.chat_id}: <code>${r.ok ? 'ok' : 'fail'}</code></li>`).join('') : '<li>(none)</li>'}
+              ${whyNo.length ? `<li class="warn">Why no alert: ${whyNo.join('; ')}</li>` : ''}
+            </ul>
+          </div>
+          <div class="card">
+            <h3>Scrape</h3>
+            <ul class="list">
+              <li>Rows seen: ${d.scrape && d.scrape.rows_seen !== undefined ? d.scrape.rows_seen : 'n/a'}</li>
+              <li>CT/MR considered: ${d.scrape && d.scrape.ctmr_considered !== undefined ? d.scrape.ctmr_considered : 'n/a'}</li>
+              <li>Base URL: ${d.scrape && d.scrape.base_url ? d.scrape.base_url : '(n/a)'}</li>
+              <li>Errors: ${(d.scrape && d.scrape.errors && d.scrape.errors.length) ? d.scrape.errors.join('; ') : '(none)'}</li>
+            </ul>
+            <div>Artifacts: <a href="last_page.html">last_page.html</a>, <a href="last_counts.csv">last_counts.csv</a></div>
+          </div>
+        </div>`;
+    }
+
+    function showNoStatusMessage(){ document.getElementById('content').innerHTML = '<p class="bad">status.json not available yet.</p>'; }
+    function loadSample(){ renderStatus(samplePayload(), true); }
+    function loadLive(){
+      fetch('status.json?_=' + Date.now())
+        .then(r => { if (!r.ok) throw new Error('status.json not available'); return r.json(); })
+        .then(d => renderStatus(d, false))
+        .catch(() => showNoStatusMessage());
+    }
+    document.getElementById('btn-sample').addEventListener('click', loadSample);
+    document.getElementById('btn-live').addEventListener('click', loadLive);
+    if (isSampleRequested()) loadSample(); else loadLive();
+  </script>
+</body>
+</html>
