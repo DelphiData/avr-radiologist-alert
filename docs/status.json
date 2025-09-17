@@ -1,7 +1,7 @@
 {
-  "timestamp": "2025-09-16 19:40:08",
+  "timestamp": "2025-09-17 07:57:02",
   "timezone": "America/New_York",
-  "allowed_window": true,
+  "allowed_window": false,
   "counts": {
     "60": 0,
     "90": 0,
@@ -9,24 +9,26 @@
   },
   "total_ctmr_60_90_120": 0,
   "alert_triggered": false,
-  "message": "CT/MR backlog 60/90/120 total=0 (>= 20 threshold). Notifying: Reed, Bargo, Croce",
+  "message": "CT/MR backlog: 60m=0, 90m=0, 120m=0 (total=0 < 20). Notifying: Reed, Bargo, Croce",
   "config": {
     "threshold_total": 20,
     "allowed_window_desc": "Mon–Fri 6pm–11pm, Sat 4am–Sun 9pm"
   },
   "contacts_total": 3,
   "notification": {
-    "recipients_sent": [],
-    "recipients_failed": [],
-    "errors": []
+    "telegram": {
+      "recipients": [],
+      "results": [],
+      "time_utc": ""
+    }
   },
   "scrape": {
     "rows_seen": 0,
     "ctmr_considered": 0,
     "errors": [
-      "fetch: RuntimeError: Failed to login/fetch Worklist. Last error: HTTPError: 404 Client Error: Not Found for url: https://avrteleris.com/AVR/Login.aspx",
+      "fetch: HTTPError: 404 Client Error: Not Found for url: https://www.avrteleris.com/AVR/Login.aspx",
       "no HTML fetched"
     ],
-    "base_url": ""
+    "base_url": "https://www.avrteleris.com/AVR"
   }
 }
