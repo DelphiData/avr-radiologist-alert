@@ -1,5 +1,5 @@
 {
-  "timestamp": "2025-09-17 08:20:37",
+  "timestamp": "2025-09-17 09:20:54",
   "timezone": "America/New_York",
   "allowed_window": false,
   "counts": {
@@ -26,7 +26,7 @@
     "rows_seen": 0,
     "ctmr_considered": 0,
     "errors": [
-      "fetch: HTTPError: 404 Client Error: Not Found for url: https://www.avrteleris.com/AVR/Login.aspx",
+      "fetch: RuntimeError: Login POST ok but Worklist not reachable",
       "no HTML fetched"
     ],
     "base_url": "https://www.avrteleris.com/AVR"
