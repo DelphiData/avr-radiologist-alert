@@ -1,7 +1,7 @@
 {
-  "time_utc": "2025-09-17T11:09:00.191445Z",
-  "event": "schedule",
-  "sha": "ec885fb18c37579a75ad83bdd8338f67e81cb040",
+  "time_utc": "2025-09-17T11:29:38.785565Z",
+  "event": "workflow_dispatch",
+  "sha": "3b4f4588685733158c5735ae0780e285927cb846",
   "ref": "refs/heads/main",
   "workflow": "AVR Monitor"
 }
