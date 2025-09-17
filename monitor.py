@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-AVR Radiologist Alerts - monitor.py
+AVR Radiologist Alerts - monitor.py (complete)
 
 What it does:
 - Logs into AVR (www host only), handling Index.aspx, query redirects, meta/JS redirects, ASP.NET hidden fields.
+- Tries index.aspx?reporttype=1 first (required by some deployments).
 - Fetches the Worklist page (NOT Completed Studies).
 - Parses only CT/MR studies and buckets by age: 60–89, 90–119, 120+ minutes. Multiple CT/MR mentions in one row are counted individually.
 - Writes status.json for scripts/send_telegram.py.
-- Always writes debug artifacts (even on failures): docs/debug_*.html, docs/last_page.html, docs/last_counts.csv.
+- ALWAYS writes debug artifacts (even on failures): docs/debug_*.html, docs/last_page.html, docs/last_counts.csv.
 
 Env vars:
   AVR_USERNAME, AVR_PASSWORD
@@ -36,16 +37,24 @@ from bs4 import BeautifulSoup
 # IMPORTANT: Use ONLY the www host (bare domain returns 404 on Login.aspx)
 BASE_URL = "https://www.avrteleris.com/AVR"
 
-INDEX_PATH = "Index.aspx"
+# Index/login candidates (some deployments require reporttype=1)
+INDEX_CANDIDATES = [
+    "Index.aspx?reporttype=1",
+    "index.aspx?reporttype=1",
+    "Index.aspx",
+    "index.aspx",
+]
 
-# IIS can serve either casing; try both
+# Worklist paths (IIS can serve either casing)
 WORKLIST_PATHS = [
     "Forms/Worklist/Worklist.aspx",
     "Forms/Worklist/worklist.aspx",
 ]
 
-# Common login endpoints if the login form isn’t on Index.aspx
+# Additional login endpoints to probe if no form is found on Index.aspx
 LOGIN_CANDIDATES = [
+    "Index.aspx?reporttype=1",
+    "index.aspx?reporttype=1",
     "Login.aspx",
     "login.aspx",
     "Forms/Login.aspx",
@@ -227,28 +236,47 @@ def try_login_and_fetch_worklist(session: requests.Session, username: str, passw
             dump(f"{label}_exception.html", f"Exception during POST {url}\n{e}", url, None)
             raise
 
-    # A) Try Worklist directly (both casings)
+    def looks_like_worklist(html: str) -> bool:
+        if not html:
+            return False
+        if "Worklist" in html:
+            return True
+        # Some pages may not include the word in title, check table header
+        return "Study Requested" in html and "Report Out Time" not in html
+
+    # A) Try Worklist directly (both casings) in case we already have a valid session
     for i, wp in enumerate(WORKLIST_PATHS, start=1):
         wl_url = _abs_url(base, wp)
         r = safe_get(wl_url, f"debug_wl_attempt_{i}")
         html = getattr(r, "text", "") or ""
-        if ("Logout" in html or "Logged In:" in html) and "Worklist" in html:
+        if looks_like_worklist(html):
             return base, html
 
-    # B) Index.aspx (login page often lives here; may redirect to ?reporttype=1)
-    idx_url = _abs_url(base, INDEX_PATH)
-    r = safe_get(idx_url, "debug_index")
-    html = getattr(r, "text", "") or ""
+    # B) Try multiple Index.aspx variants (with/without reporttype=1)
+    r = None
+    html = ""
+    for i, ic in enumerate(INDEX_CANDIDATES, start=1):
+        idx_url = _abs_url(base, ic)
+        r_try = safe_get(idx_url, f"debug_index_{i}")
+        html_try = getattr(r_try, "text", "") or ""
+        if html_try:
+            r = r_try
+            html = html_try
+            soup_try = BeautifulSoup(html_try, "html.parser")
+            if ("Logout" in html_try or "Logged In:" in html_try) or _find_login_form(soup_try):
+                break
+    if not r:
+        raise RuntimeError("Failed to fetch any Index.aspx variant")
 
     # Already logged in?
-    if ("Logout" in html or "Logged In:" in html) and "Worklist" in html:
+    if ("Logout" in html or "Logged In:" in html) and looks_like_worklist(html):
         r2 = safe_get(_abs_url(base, WORKLIST_PATHS[0]), "debug_wl_via_index")
         return base, getattr(r2, "text", "") or ""
 
     soup = BeautifulSoup(html, "html.parser")
     form = _find_login_form(soup)
 
-    # C) Probe specific login endpoints if no form on Index.aspx
+    # C) Probe specific login endpoints if no form on Index.aspx variants
     if not form:
         for cand in LOGIN_CANDIDATES:
             r2 = safe_get(_abs_url(base, cand), f"debug_login_page_{cand.replace('/', '_')}")
@@ -264,19 +292,32 @@ def try_login_and_fetch_worklist(session: requests.Session, username: str, passw
         dump("debug_no_login_form.html", html, getattr(r, "url", ""), getattr(r, "status_code", None))
         raise RuntimeError("No login form found")
 
-    # D) POST credentials
+    # D) POST credentials (post back to form action if present, otherwise to the same page URL we fetched)
     payload = _build_form_payload(form, username, password)
-    action = form.get("action") or ""
-    post_url = _abs_url(base, action or "Login.aspx")
-    r3 = safe_post(post_url, payload, getattr(r, "url", idx_url), "debug_after_login_post")
+    action = (form.get("action") or "").strip()
+    post_url = _abs_url(base, action) if action else getattr(r, "url", _abs_url(base, INDEX_CANDIDATES[0]))
+    r3 = safe_post(post_url, payload, getattr(r, "url", post_url), "debug_after_login_post")
 
     # E) Fetch Worklist finally (try both casings)
     for i, wp in enumerate(WORKLIST_PATHS, start=1):
         wl_url = _abs_url(base, wp)
         r4 = safe_get(wl_url, f"debug_wl_final_{i}")
         html_wl = getattr(r4, "text", "") or ""
-        if "Worklist" in html_wl:
+        if looks_like_worklist(html_wl):
             return base, html_wl
+
+    # Try to discover a Worklist link from the current page as a last resort
+    try:
+        soup_post = BeautifulSoup(getattr(r3, "text", "") or "", "html.parser")
+        for a in soup_post.find_all("a", href=True):
+            if "Worklist" in a.get_text(" ", strip=True) or "Worklist" in a["href"]:
+                wl_url = _abs_url(base, a["href"])
+                r5 = safe_get(wl_url, "debug_wl_from_link")
+                html_wl = getattr(r5, "text", "") or ""
+                if looks_like_worklist(html_wl):
+                    return base, html_wl
+    except Exception as _:
+        pass
 
     # If we got here, we didn't see Worklist even after POST
     raise RuntimeError("Login POST ok but Worklist not reachable")
