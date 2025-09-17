@@ -1,18 +1,22 @@
 #!/usr/bin/env python3
 """
-AVR Radiologist Alerts - monitor.py (www-only, robust login, CT/MR parser, Telegram-ready)
+AVR Radiologist Alerts - monitor.py
 
-- Logs into AVR (handles Index.aspx, meta/JS redirects, ASP.NET hidden fields)
-- Fetches the Worklist page (NOT Completed Studies)
-- Counts only CT/MR studies aged 60–89, 90–119, 120+ minutes
-  • Each CT or MR/MRI mention in a study cell is counted individually
-- Writes status.json used by scripts/send_telegram.py
-- Saves debug snapshots: docs/last_page.html, docs/last_counts.csv, plus docs/debug_*.html
+What it does:
+- Logs into AVR (www host only), handling Index.aspx, query redirects, meta/JS redirects, ASP.NET hidden fields.
+- Fetches the Worklist page (NOT Completed Studies).
+- Parses only CT/MR studies and buckets by age: 60–89, 90–119, 120+ minutes. Multiple CT/MR mentions in one row are counted individually.
+- Writes status.json for scripts/send_telegram.py.
+- Always writes debug artifacts (even on failures): docs/debug_*.html, docs/last_page.html, docs/last_counts.csv.
 
-Env:
+Env vars:
   AVR_USERNAME, AVR_PASSWORD
-  TIMEZONE (default America/New_York)
+  TIMEZONE (defaults to America/New_York)
   FORCE_ALERT (true/false)
+
+Optional files (if present):
+  config.yml     -> { threshold_total: int }
+  contacts.yml   -> [ { name: "..." }, ... ]
 """
 
 import os
@@ -64,7 +68,7 @@ def now_in_tz(tzname: str) -> dt.datetime:
     return dt.datetime.now(tz)
 
 def allowed_window(now_local: dt.datetime) -> bool:
-    # Mon–Fri 6:00 pm–11:59 pm; Sat 4:00 am–11:59 pm; Sun 12:00 am–9:00 pm
+    # Mon–Fri 6:00 pm–11:59:59 pm; Sat 4:00 am–11:59:59 pm; Sun 12:00 am–9:00 pm
     wd = now_local.weekday()
     t = now_local.time()
     def between(a: dt.time, b: dt.time) -> bool:
@@ -85,7 +89,7 @@ def read_yaml(path: str, default: Any) -> Any:
 def safe_write_text(path: str, text: str):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
-        f.write(text)
+        f.write(text if text is not None else "")
 
 def safe_write_status(status: Dict[str, Any]):
     with open("status.json", "w", encoding="utf-8") as f:
@@ -101,6 +105,8 @@ def _abs_url(base: str, path: str) -> str:
     return f"{base.rstrip('/')}/{path.lstrip('/')}"
 
 def _extract_meta_js_redirect(html: str) -> Optional[str]:
+    if not html:
+        return None
     soup = BeautifulSoup(html, "html.parser")
     for m in soup.find_all("meta"):
         if m.get("http-equiv", "").lower() == "refresh":
@@ -160,7 +166,7 @@ def _build_form_payload(form, username: str, password: str) -> Dict[str, str]:
                     pass_set = True
                     break
 
-    # Ensure a submit value if present
+    # Ensure a submit value if present (ASP.NET buttons often need their name present)
     for inp in form.find_all("input"):
         if (inp.get("type") or "").lower() in ("submit","button"):
             n = inp.get("name")
@@ -168,106 +174,111 @@ def _build_form_payload(form, username: str, password: str) -> Dict[str, str]:
                 payload[n] = inp.get("value","") or "Login"
     return payload
 
-# ---------------- Login + fetch ----------------
+# ---------------- Login + fetch (always dumps artifacts) ----------------
 
 def try_login_and_fetch_worklist(session: requests.Session, username: str, password: str, dbg: bool = True) -> Tuple[str, str]:
     """
     Returns (base_url, worklist_html) using the www host only.
-    Strategy:
-      - Try Worklist directly (both casings)
-      - GET Index.aspx (follow meta/JS redirects)
-      - Find login form or probe known login endpoints
-      - POST with ASP.NET fields
-      - GET Worklist again
+    ALWAYS dumps HTML snapshots before any raise so artifacts exist even on errors.
     """
     headers = {"User-Agent": UA}
     base = BASE_URL
-    first_dump_done = False
 
-    def dump(name: str, html: str):
-        nonlocal first_dump_done
+    def dump(name: str, html: str, url: str = "", status: Optional[int] = None):
         if not dbg:
             return
         os.makedirs("docs", exist_ok=True)
-        safe_write_text(f"docs/{name}", html)
-        if not first_dump_done:
-            safe_write_text("docs/debug_first_response.html", html)
-            first_dump_done = True
+        prefix = ""
+        if url or status is not None:
+            prefix = f"<!-- url={url} status={status} -->\n"
+        safe_write_text(f"docs/{name}", prefix + (html or ""))
 
-    def get_follow(url: str) -> requests.Response:
-        r = session.get(url, headers=headers, timeout=30, allow_redirects=True)
-        r.raise_for_status()
-        html = r.text
-        red = _extract_meta_js_redirect(html)
-        if red:
-            r = session.get(_abs_url(base, red), headers=headers, timeout=30, allow_redirects=True)
-            r.raise_for_status()
-        return r
+    def safe_get(url: str, label: str) -> requests.Response:
+        try:
+            r = session.get(url, headers=headers, timeout=30, allow_redirects=True)
+            dump(f"{label}.html", getattr(r, "text", ""), r.url, r.status_code)
+            # Follow meta/JS redirect if present
+            html = getattr(r, "text", "")
+            red = _extract_meta_js_redirect(html or "")
+            if red:
+                r2 = session.get(_abs_url(base, red), headers=headers, timeout=30, allow_redirects=True)
+                dump(f"{label}_redirect.html", getattr(r2, "text", ""), r2.url, r2.status_code)
+                return r2
+            return r
+        except Exception as e:
+            dump(f"{label}_exception.html", f"Exception during GET {url}\n{e}", url, None)
+            raise
+
+    def safe_post(url: str, data: Dict[str, str], ref: str, label: str) -> requests.Response:
+        try:
+            headers_post = dict(headers)
+            headers_post["Referer"] = ref
+            r = session.post(url, data=data, headers=headers_post, timeout=30, allow_redirects=True)
+            dump(f"{label}.html", getattr(r, "text", ""), r.url, r.status_code)
+            # Follow meta/JS redirect if present
+            html = getattr(r, "text", "")
+            red = _extract_meta_js_redirect(html or "")
+            if red:
+                r2 = session.get(_abs_url(base, red), headers=headers, timeout=30, allow_redirects=True)
+                dump(f"{label}_redirect.html", getattr(r2, "text", ""), r2.url, r2.status_code)
+                return r2
+            return r
+        except Exception as e:
+            dump(f"{label}_exception.html", f"Exception during POST {url}\n{e}", url, None)
+            raise
 
     # A) Try Worklist directly (both casings)
-    for wp in WORKLIST_PATHS:
+    for i, wp in enumerate(WORKLIST_PATHS, start=1):
         wl_url = _abs_url(base, wp)
-        r = get_follow(wl_url)
-        html = r.text
-        dump("debug_wl_attempt.html", html)
+        r = safe_get(wl_url, f"debug_wl_attempt_{i}")
+        html = getattr(r, "text", "") or ""
         if ("Logout" in html or "Logged In:" in html) and "Worklist" in html:
             return base, html
 
-    # B) Index.aspx
+    # B) Index.aspx (login page often lives here; may redirect to ?reporttype=1)
     idx_url = _abs_url(base, INDEX_PATH)
-    r = get_follow(idx_url)
-    html = r.text
-    dump("debug_index.html", html)
+    r = safe_get(idx_url, "debug_index")
+    html = getattr(r, "text", "") or ""
 
     # Already logged in?
     if ("Logout" in html or "Logged In:" in html) and "Worklist" in html:
-        w = get_follow(_abs_url(base, WORKLIST_PATHS[0]))
-        return base, w.text
+        r2 = safe_get(_abs_url(base, WORKLIST_PATHS[0]), "debug_wl_via_index")
+        return base, getattr(r2, "text", "") or ""
 
     soup = BeautifulSoup(html, "html.parser")
     form = _find_login_form(soup)
 
-    # C) Probe specific login endpoints if no form yet
+    # C) Probe specific login endpoints if no form on Index.aspx
     if not form:
         for cand in LOGIN_CANDIDATES:
-            r2 = get_follow(_abs_url(base, cand))
-            html2 = r2.text
-            dump("debug_login_page.html", html2)
+            r2 = safe_get(_abs_url(base, cand), f"debug_login_page_{cand.replace('/', '_')}")
+            html2 = getattr(r2, "text", "") or ""
             soup2 = BeautifulSoup(html2, "html.parser")
             form = _find_login_form(soup2)
             if form:
                 html = html2
+                r = r2
                 break
 
     if not form:
+        dump("debug_no_login_form.html", html, getattr(r, "url", ""), getattr(r, "status_code", None))
         raise RuntimeError("No login form found")
 
     # D) POST credentials
     payload = _build_form_payload(form, username, password)
     action = form.get("action") or ""
     post_url = _abs_url(base, action or "Login.aspx")
-    headers_post = dict(headers)
-    headers_post["Referer"] = r.url
+    r3 = safe_post(post_url, payload, getattr(r, "url", idx_url), "debug_after_login_post")
 
-    r3 = session.post(post_url, data=payload, headers=headers_post, timeout=30, allow_redirects=True)
-    r3.raise_for_status()
-    html3 = r3.text
-    dump("debug_after_login_post.html", html3)
-
-    red3 = _extract_meta_js_redirect(html3)
-    if red3:
-        r3 = get_follow(_abs_url(base, red3))
-        dump("debug_after_login_redirect.html", r3.text)
-
-    # E) Fetch Worklist finally
-    for wp in WORKLIST_PATHS:
+    # E) Fetch Worklist finally (try both casings)
+    for i, wp in enumerate(WORKLIST_PATHS, start=1):
         wl_url = _abs_url(base, wp)
-        w = get_follow(wl_url)
-        html_wl = w.text
-        dump("debug_wl_final.html", html_wl)
+        r4 = safe_get(wl_url, f"debug_wl_final_{i}")
+        html_wl = getattr(r4, "text", "") or ""
         if "Worklist" in html_wl:
             return base, html_wl
 
+    # If we got here, we didn't see Worklist even after POST
     raise RuntimeError("Login POST ok but Worklist not reachable")
 
 # ---------------- Parser ----------------
@@ -322,10 +333,9 @@ def parse_worklist_counts(html: str, now_local: dt.datetime, tz) -> Tuple[Dict[s
 
         # Split on common separators or the word AND, count CT/MR tokens
         parts = [p.strip() for p in re.split(r"[;,/]|(?:\bAND\b)", study_upper) if p.strip()]
-        # Count CT and MR/MRI mentions across parts
         inc = 0
         for p in parts:
-            # Strict word boundaries to avoid matching CTA, etc.
+            # Strict word boundaries to avoid matching CTA, MRN, etc.
             inc += len(re.findall(r"\bCT\b", p))
             inc += len(re.findall(r"\bMRI?\b", p))  # MR or MRI
 
@@ -437,7 +447,6 @@ def main():
     if force_alert:
         alert_ok = True
 
-    # Include per-bucket counts in message as requested
     message = (
         f"CT/MR backlog: 60m={counts['60']}, 90m={counts['90']}, 120m={counts['120']} "
         f"(total={total} {'>=' if total >= threshold else '<'} {threshold}). "
