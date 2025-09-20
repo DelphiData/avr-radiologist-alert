@@ -1,7 +1,7 @@
 {
-  "timestamp": "2025-09-20 03:09:27",
+  "timestamp": "2025-09-20 04:13:14",
   "timezone": "America/New_York",
-  "allowed_window": false,
+  "allowed_window": true,
   "counts": {
     "60": 0,
     "90": 0,
