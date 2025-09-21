@@ -3,24 +3,14 @@ name: AVR Debug
 on:
   workflow_dispatch:
     inputs:
-      action:
-        description: "ids = list chat IDs, test = send test msg, run-monitor = run scraper+alert"
-        required: true
-        default: "run-monitor"
-        type: choice
-        options: [ids, test, run-monitor]
-      message:
-        description: "Test message text (used when action=test)"
-        required: false
-        default: "AVR Telegram test"
-      channel_username:
-        description: "Optional @channelusername to resolve (used when action=ids)"
-        required: false
-        default: ""
       force_alert:
-        description: "Force alert for run-monitor (true/false)"
-        required: false
-        default: "false"
+        type: boolean
+        default: false
+        description: "Force Telegram alert regardless of counts/window"
+      timezone:
+        type: string
+        default: "America/New_York"
+        description: "Optional TZ override for this run"
 
 permissions:
   contents: write
@@ -28,29 +18,17 @@ permissions:
 jobs:
   debug:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
     env:
       AVR_USERNAME: ${{ secrets.AVR_USERNAME }}
       AVR_PASSWORD: ${{ secrets.AVR_PASSWORD }}
-      TIMEZONE: ${{ secrets.TIMEZONE }}
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_IDS: ${{ secrets.TELEGRAM_CHAT_IDS }}
-      FORCE_ALERT: ${{ github.event.inputs.force_alert }}
+      TIMEZONE: America/New_York
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Preflight diagnostics
-        run: |
-          echo "Ref: ${{ github.ref }}"
-          echo "Action: ${{ github.event.inputs.action }}"
-          python - <<'PY'
-          import os
-          for k in ["AVR_USERNAME","AVR_PASSWORD","TIMEZONE","TELEGRAM_BOT_TOKEN","TELEGRAM_CHAT_IDS"]:
-              print(f"{k} present:", bool(os.environ.get(k,"")))
-          print("FORCE_ALERT:", os.environ.get("FORCE_ALERT",""))
-          PY
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -62,65 +40,50 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests beautifulsoup4 pytz pyyaml
 
-      # ===== IDs mode =====
-      - name: Telegram getMe
-        if: ${{ github.event.inputs.action == 'ids' }}
+      - name: Apply workflow inputs to env
+        shell: bash
         run: |
-          curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe" | jq .
+          if [ "${{ inputs.force_alert }}" = "true" ]; then
+            echo "FORCE_ALERT=true" >> "$GITHUB_ENV"
+          else
+            echo "FORCE_ALERT=false" >> "$GITHUB_ENV"
+          fi
+          if [ -n "${{ inputs.timezone }}" ]; then
+            echo "TIMEZONE=${{ inputs.timezone }}" >> "$GITHUB_ENV"
+          fi
+          echo "Using TIMEZONE=$TIMEZONE FORCE_ALERT=$FORCE_ALERT"
 
-      - name: Telegram getUpdates
-        if: ${{ github.event.inputs.action == 'ids' }}
+      - name: Telegram getMe (sanity)
         run: |
-          curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getUpdates" | tee updates.json | jq .
+          if [ -n "$TELEGRAM_BOT_TOKEN" ]; then
+            curl -sS "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe" || true
+          else
+            echo "No TELEGRAM_BOT_TOKEN; skipping."
+          fi
 
-      - name: Extract chat IDs
-        if: ${{ github.event.inputs.action == 'ids' }}
+      - name: Telegram send debug ping (optional)
         run: |
-          python - <<'PY'
-          import json, sys
-          try:
-              j=json.load(open('updates.json'))
-          except Exception as e:
-              print("No updates.json or parse error:", e); sys.exit(0)
-          seen=set()
-          for r in j.get('result', []):
-              m = r.get('message') or r.get('channel_post') or r.get('edited_message') or r.get('edited_channel_post')
-              if not m: continue
-              c=m.get('chat',{})
-              cid=c.get('id'); typ=c.get('type'); name=c.get('title') or c.get('username') or ''
-              if cid in seen: continue
-              seen.add(cid)
-              print(f"{typ}\t{cid}\t{name}")
-          PY
+          if [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$TELEGRAM_CHAT_IDS" ]; then
+            TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            # Split on comma/semicolon/space
+            for cid in $(echo "$TELEGRAM_CHAT_IDS" | tr ',;' ' '); do
+              [ -z "$cid" ] && continue
+              curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+                -d "chat_id=$cid" -d "text=AVR Debug ping $TS" || true
+              sleep 0.3
+            done
+          else
+            echo "TELEGRAM_* not set; skipping debug ping."
+          fi
 
-      # ===== Test mode =====
-      - name: Send Telegram test message
-        if: ${{ github.event.inputs.action == 'test' }}
-        run: |
-          IFS=',' read -ra IDS <<< "$TELEGRAM_CHAT_IDS"
-          for ID in "${IDS[@]}"; do
-            ID="$(echo "$ID" | xargs)"
-            echo "Sending to $ID"
-            curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
-              -d chat_id="$ID" \
-              --data-urlencode "text=${{ github.event.inputs.message }}" | jq .
-          done
-
-      # ===== Run monitor =====
       - name: Run monitor.py (creates/updates status.json)
-        if: ${{ github.event.inputs.action == 'run-monitor' }}
-        run: |
-          python monitor.py || true
-          echo "--- status.json (if present) ---"
-          [ -f status.json ] && cat status.json || echo "status.json not found"
+        run: python monitor.py || true
 
       - name: Send Telegram alert via script
-        if: ${{ github.event.inputs.action == 'run-monitor' }}
-        run: |
-          python scripts/send_telegram.py
+        run: python scripts/send_telegram.py || true
 
       - name: Upload artifacts
-        if: ${{ github.event.inputs.action == 'run-monitor' }}
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: debug-artifacts
@@ -128,27 +91,39 @@ jobs:
             status.json
             docs/last_page.html
             docs/last_counts.csv
-            docs/debug_first_response.html
-            docs/debug_index.html
-            docs/debug_login_page.html
-            docs/debug_after_login_post.html
-            docs/debug_after_login_redirect.html
-            docs/debug_wl_attempt.html
-            docs/debug_wl_final.html
-          if-no-files-found: ignore
+            docs/debug_*.html
+            docs/debug_discover_*.html
+            docs/*.json
+          if-no-files-found: warn
           retention-days: 7
+          compression-level: 6
+          overwrite: false
+          include-hidden-files: false
 
       - name: Publish status.json to docs
-        if: ${{ github.event.inputs.action == 'run-monitor' }}
+        if: always()
+        shell: bash
         run: |
+          set -e
+          mkdir -p docs
           if [ -f status.json ]; then
-            mkdir -p docs
             cp status.json docs/status.json
-            git config user.name "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
-            git add docs/status.json
-            git commit -m "Debug: update status.json [skip ci]" || true
+          else
+            echo '{}' > docs/status.json
+          fi
+          printf '{"time_utc":"%s","event":"%s","sha":"%s","ref":"%s","workflow":"%s"}\n' \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            "${{ github.event_name }}" \
+            "${{ github.sha }}" \
+            "${{ github.ref }}" \
+            "${{ github.workflow }}" > docs/last_monitor_run.json
+
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git add docs/status.json docs/last_monitor_run.json || true
+          if ! git diff --cached --quiet; then
+            git commit -m "AVR Debug: publish status.json [skip ci]"
             git push
           else
-            echo "status.json not found; skipping publish"
+            echo "No changes to commit."
           fi
