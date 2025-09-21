@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-AVR Radiologist Alerts - monitor.py (complete)
+AVR Radiologist Alerts - monitor.py (complete with login variants + discovery)
 
 What it does:
 - Logs into AVR (www host only), handling Index.aspx, query redirects, meta/JS redirects, ASP.NET hidden fields.
-- Tries index.aspx?reporttype=1 first (required by some deployments).
+- Tries index.aspx?reporttype=1 first, plus other variants.
 - Fetches the Worklist page (NOT Completed Studies).
-- Parses only CT/MR studies and buckets by age: 60–89, 90–119, 120+ minutes. Multiple CT/MR mentions in one row are counted individually.
+- If fixed Worklist paths fail, auto-discovers the Worklist by following in-site links/frames and scanning for the target table.
+- Parses only CT/MR studies and buckets by age: 60–89, 90–119, 120+ minutes. Multiple CT/MR mentions per row are counted individually.
 - Writes status.json for scripts/send_telegram.py.
 - ALWAYS writes debug artifacts (even on failures): docs/debug_*.html, docs/last_page.html, docs/last_counts.csv.
 
@@ -27,7 +28,9 @@ import json
 import pytz
 import yaml
 import datetime as dt
-from typing import Optional, Tuple, Dict, Any, List
+from typing import Optional, Tuple, Dict, Any, List, Set
+from collections import deque
+from urllib.parse import urlsplit, urlunsplit, urljoin
 
 import requests
 from bs4 import BeautifulSoup
@@ -45,10 +48,14 @@ INDEX_CANDIDATES = [
     "index.aspx",
 ]
 
-# Worklist paths (IIS can serve either casing)
+# Worklist paths (expand set; IIS can serve different casings/locations)
 WORKLIST_PATHS = [
     "Forms/Worklist/Worklist.aspx",
     "Forms/Worklist/worklist.aspx",
+    "Worklist.aspx",
+    "Forms/PrelimReport/Worklist.aspx",
+    "Forms/Results/Worklist.aspx",
+    "Forms/WorkList/WorkList.aspx",
 ]
 
 # Additional login endpoints to probe if no form is found on Index.aspx
@@ -60,6 +67,11 @@ LOGIN_CANDIDATES = [
     "Forms/Login.aspx",
     "Account/Login.aspx",
     "Default.aspx",
+]
+
+# Keywords to prioritize in link/iframe discovery after login
+DISCOVERY_KEYWORDS = [
+    "worklist", "work list", "results", "report", "prelim", "pending"
 ]
 
 DEFAULT_TZ = "America/New_York"
@@ -108,10 +120,14 @@ def _abs_url(base: str, path: str) -> str:
     if path.startswith("http://") or path.startswith("https://"):
         return path
     if path.startswith("/"):
-        from urllib.parse import urlsplit, urlunsplit
         sp = urlsplit(base)
         return urlunsplit((sp.scheme, sp.netloc, path, "", ""))
     return f"{base.rstrip('/')}/{path.lstrip('/')}"
+
+def _same_origin(base: str, url: str) -> bool:
+    a = urlsplit(base)
+    b = urlsplit(url)
+    return (a.scheme, a.netloc) == (b.scheme, b.netloc)
 
 def _extract_meta_js_redirect(html: str) -> Optional[str]:
     if not html:
@@ -183,6 +199,53 @@ def _build_form_payload(form, username: str, password: str) -> Dict[str, str]:
                 payload[n] = inp.get("value","") or "Login"
     return payload
 
+# ---------------- Discovery helpers ----------------
+
+def looks_like_worklist(html: str) -> bool:
+    if not html:
+        return False
+    # Must have Study Requested and not Completed Studies output table
+    if ("Study Requested" in html) and ("Report Out Time" not in html):
+        return True
+    # Fallback: some pages use “Worklist” text prominently
+    return "Worklist" in html
+
+def collect_links_and_frames(base_page_url: str, html: str, base_origin: str) -> List[str]:
+    urls: List[str] = []
+    soup = BeautifulSoup(html or "", "html.parser")
+    # Anchors
+    for a in soup.find_all("a", href=True):
+        href = a["href"].strip()
+        u = urljoin(base_page_url, href)
+        if _same_origin(base_origin, u):
+            urls.append(u)
+    # Frames/iframes
+    for fr in soup.find_all(["frame", "iframe"]):
+        src = (fr.get("src") or "").strip()
+        if not src:
+            continue
+        u = urljoin(base_page_url, src)
+        if _same_origin(base_origin, u):
+            urls.append(u)
+    # Dedup but keep order
+    seen: Set[str] = set()
+    ordered = []
+    for u in urls:
+        if u not in seen:
+            seen.add(u)
+            ordered.append(u)
+    return ordered
+
+def prioritize(urls: List[str]) -> List[str]:
+    # Prefer URLs that contain discovery keywords
+    scored = []
+    for u in urls:
+        low = u.lower()
+        score = sum(1 for k in DISCOVERY_KEYWORDS if k in low)
+        scored.append((score, u))
+    scored.sort(key=lambda x: (-x[0], x[1]))
+    return [u for _, u in scored]
+
 # ---------------- Login + fetch (always dumps artifacts) ----------------
 
 def try_login_and_fetch_worklist(session: requests.Session, username: str, password: str, dbg: bool = True) -> Tuple[str, str]:
@@ -236,14 +299,6 @@ def try_login_and_fetch_worklist(session: requests.Session, username: str, passw
             dump(f"{label}_exception.html", f"Exception during POST {url}\n{e}", url, None)
             raise
 
-    def looks_like_worklist(html: str) -> bool:
-        if not html:
-            return False
-        if "Worklist" in html:
-            return True
-        # Some pages may not include the word in title, check table header
-        return "Study Requested" in html and "Report Out Time" not in html
-
     # A) Try Worklist directly (both casings) in case we already have a valid session
     for i, wp in enumerate(WORKLIST_PATHS, start=1):
         wl_url = _abs_url(base, wp)
@@ -293,12 +348,12 @@ def try_login_and_fetch_worklist(session: requests.Session, username: str, passw
         raise RuntimeError("No login form found")
 
     # D) POST credentials (post back to form action if present, otherwise to the same page URL we fetched)
-    payload = _build_form_payload(form, username, password)
+    payload = _build_form_payload(form, os.getenv("AVR_USERNAME",""), os.getenv("AVR_PASSWORD",""))
     action = (form.get("action") or "").strip()
     post_url = _abs_url(base, action) if action else getattr(r, "url", _abs_url(base, INDEX_CANDIDATES[0]))
     r3 = safe_post(post_url, payload, getattr(r, "url", post_url), "debug_after_login_post")
 
-    # E) Fetch Worklist finally (try both casings)
+    # E1) Try Worklist fixed paths again after login
     for i, wp in enumerate(WORKLIST_PATHS, start=1):
         wl_url = _abs_url(base, wp)
         r4 = safe_get(wl_url, f"debug_wl_final_{i}")
@@ -306,20 +361,38 @@ def try_login_and_fetch_worklist(session: requests.Session, username: str, passw
         if looks_like_worklist(html_wl):
             return base, html_wl
 
-    # Try to discover a Worklist link from the current page as a last resort
-    try:
-        soup_post = BeautifulSoup(getattr(r3, "text", "") or "", "html.parser")
-        for a in soup_post.find_all("a", href=True):
-            if "Worklist" in a.get_text(" ", strip=True) or "Worklist" in a["href"]:
-                wl_url = _abs_url(base, a["href"])
-                r5 = safe_get(wl_url, "debug_wl_from_link")
-                html_wl = getattr(r5, "text", "") or ""
-                if looks_like_worklist(html_wl):
-                    return base, html_wl
-    except Exception as _:
-        pass
+    # E2) Discovery crawl (depth-limited) to find Worklist via links/frames
+    start_url = getattr(r3, "url", _abs_url(base, INDEX_CANDIDATES[0]))
+    start_html = getattr(r3, "text", "") or ""
+    origin = BASE_URL  # same origin restriction
 
-    # If we got here, we didn't see Worklist even after POST
+    q = deque()
+    seen: Set[str] = set()
+
+    initial = prioritize(collect_links_and_frames(start_url, start_html, origin))
+    for u in initial:
+        q.append((u, 1))
+        seen.add(u)
+
+    max_depth = 2
+    visit_count = 0
+    max_visits = 25
+
+    while q and visit_count < max_visits:
+        url, depth = q.popleft()
+        visit_count += 1
+        rX = safe_get(url, f"debug_discover_{visit_count:02d}")
+        htmlX = getattr(rX, "text", "") or ""
+        if looks_like_worklist(htmlX):
+            return base, htmlX
+        if depth < max_depth:
+            nxt = prioritize(collect_links_and_frames(getattr(rX, "url", url), htmlX, origin))
+            for u in nxt:
+                if u not in seen and u.startswith(BASE_URL):
+                    seen.add(u)
+                    q.append((u, depth + 1))
+
+    # If we got here, we didn't see Worklist even after discovery
     raise RuntimeError("Login POST ok but Worklist not reachable")
 
 # ---------------- Parser ----------------
