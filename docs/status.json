@@ -1,5 +1,5 @@
 {
-  "timestamp": "2025-09-21 16:11:04",
+  "timestamp": "2025-09-21 17:08:46",
   "timezone": "America/New_York",
   "allowed_window": true,
   "counts": {
@@ -26,8 +26,7 @@
     "rows_seen": 0,
     "ctmr_considered": 0,
     "errors": [
-      "fetch: RuntimeError: Login POST ok but Worklist not reachable",
-      "no HTML fetched"
+      "worklist table not found"
     ],
     "base_url": "https://www.avrteleris.com/AVR"
   }
