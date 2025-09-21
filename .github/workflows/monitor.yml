@@ -1,47 +1,38 @@
 name: AVR Monitor
 
 on:
+  schedule:
+    # Hourly (UTC). monitor.py enforces allowed window in America/New_York.
+    - cron: "0 * * * *"
   workflow_dispatch:
     inputs:
       force_alert:
-        description: "Force alert (bypass window/threshold) for testing"
-        required: false
-        default: "false"
-  schedule:
-    - cron: "0 * * * *"  # hourly in UTC (runs at top of every hour)
+        type: boolean
+        default: false
+        description: "Force Telegram alert regardless of counts/window"
+      timezone:
+        type: string
+        default: "America/New_York"
+        description: "Optional TZ override for this run"
 
 permissions:
   contents: write
 
-concurrency:
-  group: avr-monitor
-  cancel-in-progress: false
-
 jobs:
   monitor:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
     env:
       AVR_USERNAME: ${{ secrets.AVR_USERNAME }}
       AVR_PASSWORD: ${{ secrets.AVR_PASSWORD }}
-      TIMEZONE: ${{ secrets.TIMEZONE }}
-      FORCE_ALERT: ${{ github.event.inputs.force_alert }}
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_IDS: ${{ secrets.TELEGRAM_CHAT_IDS }}
+      # Default TZ; can be overridden by workflow_dispatch input below.
+      TIMEZONE: America/New_York
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Show commit and file fingerprints
-        run: |
-          echo "Ref: ${{ github.ref }}"
-          echo "SHA: ${{ github.sha }}"
-          git --no-pager log -1 --pretty=fuller
-          echo "monitor.py head:"
-          sed -n '1,80p' monitor.py || true
-          echo "grep BASE_URL:"
-          grep -n "BASE_URL" -n monitor.py || true
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -53,56 +44,72 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests beautifulsoup4 pytz pyyaml
 
-      - name: Preflight diagnostics
+      - name: Apply workflow inputs to env
+        shell: bash
         run: |
-          python - <<'PY'
-          import os, json, datetime as dt
-          print("AVR_USERNAME present:", bool(os.getenv("AVR_USERNAME")))
-          print("AVR_PASSWORD present:", bool(os.getenv("AVR_PASSWORD")))
-          print("TIMEZONE:", os.getenv("TIMEZONE"))
-          print("TELEGRAM_BOT_TOKEN present:", bool(os.getenv("TELEGRAM_BOT_TOKEN")))
-          print("TELEGRAM_CHAT_IDS:", os.getenv("TELEGRAM_CHAT_IDS"))
-          print("FORCE_ALERT:", os.getenv("FORCE_ALERT"))
-          PY
+          # FORCE_ALERT from input (defaults to false when not provided)
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force_alert }}" = "true" ]; then
+            echo "FORCE_ALERT=true" >> "$GITHUB_ENV"
+          else
+            echo "FORCE_ALERT=false" >> "$GITHUB_ENV"
+          fi
+          # TIMEZONE override from input (optional)
+          if [ -n "${{ inputs.timezone }}" ]; then
+            echo "TIMEZONE=${{ inputs.timezone }}" >> "$GITHUB_ENV"
+          fi
+          echo "Using TIMEZONE=$TIMEZONE FORCE_ALERT=$FORCE_ALERT"
 
-      - name: Run monitor
-        run: |
-          python monitor.py || true
-          echo "--- status.json (if present) ---"
-          [ -f status.json ] && cat status.json || echo "status.json not found"
+      - name: Run monitor.py (creates/updates status.json)
+        run: python monitor.py || true
 
-      - name: Send Telegram alert
+      - name: Send Telegram alert via script
+        # Never block artifacts/publish if Telegram fails
+        run: python scripts/send_telegram.py || true
+
+      - name: Upload artifacts
         if: always()
-        run: |
-          python scripts/send_telegram.py
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-artifacts
+          path: |
+            status.json
+            docs/last_page.html
+            docs/last_counts.csv
+            docs/debug_*.html
+            docs/debug_discover_*.html
+            docs/*.json
+          if-no-files-found: warn
+          retention-days: 7
+          compression-level: 6
+          overwrite: false
+          include-hidden-files: false
 
-      - name: Write heartbeat (last_monitor_run.json)
+      - name: Publish status.json to docs
         if: always()
+        shell: bash
         run: |
-          mkdir -p docs
-          python - <<'PY'
-          import json, os, datetime as dt
-          beat = {
-            "time_utc": dt.datetime.utcnow().isoformat()+"Z",
-            "event": "${{ github.event_name }}",
-            "sha": "${{ github.sha }}",
-            "ref": "${{ github.ref }}",
-            "workflow": "AVR Monitor",
-          }
-          with open("docs/last_monitor_run.json","w",encoding="utf-8") as f:
-              json.dump(beat,f,indent=2)
-          print(beat)
-          PY
-
-      - name: Publish status and heartbeat to docs
-        if: success() || failure()
-        run: |
+          set -e
           mkdir -p docs
           if [ -f status.json ]; then
             cp status.json docs/status.json
+          else
+            # Ensure a heartbeat even if status.json was not created
+            echo '{}' > docs/status.json
           fi
+          # Heartbeat file for quick checks
+          printf '{"time_utc":"%s","event":"%s","sha":"%s","ref":"%s","workflow":"%s"}\n' \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            "${{ github.event_name }}" \
+            "${{ github.sha }}" \
+            "${{ github.ref }}" \
+            "${{ github.workflow }}" > docs/last_monitor_run.json
+
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
           git add docs/status.json docs/last_monitor_run.json || true
-          git commit -m "Monitor publish: status/heartbeat [skip ci]" || true
-          git push
+          if ! git diff --cached --quiet; then
+            git commit -m "AVR Monitor: publish status.json [skip ci]"
+            git push
+          else
+            echo "No changes to commit."
+          fi
